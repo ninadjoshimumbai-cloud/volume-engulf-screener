@@ -22,7 +22,7 @@ def send_telegram(msg):
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}
         r = requests.post(url, json=data, timeout=10)
-        print(f"Telegram sent: {r.status_code}")
+        print(f"Telegram sent: {r.status_code} - {r.text}")
     except Exception as e:
         print(f"Telegram error: {e}")
 
@@ -34,68 +34,83 @@ def fetch_daily(sym, limit=60):
             if r.status_code != 200:
                 url = url.replace("data-api.binance.vision","api.binance.com")
                 r = requests.get(url, timeout=10)
-            if r.status_code != 200: return []
+            if r.status_code != 200: 
+                return []
             data = r.json()
             return [[int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])] for c in data]
-        except:
+        except Exception as e:
+            print(f"Fetch error {sym}: {e}")
             time.sleep(0.5)
     return []
 
 def main():
-    print("Starting Daily Volume Engulf Screener...")
+    print("Starting Daily Volume Engulf Screener - FIXED LOGIC")
+    print("Logic: Kal (closed) vs Parso (closed)")
+    
     engulf_list = []
     no_engulf = []
 
     for delta_sym in TOP34_DELTA:
         bin_sym = BINANCE_MAP[delta_sym]
         daily = fetch_daily(bin_sym, 60)
-        if len(daily) < 2: continue
         
-        prev = daily[-2]
-        curr = daily[-1]
+        if len(daily) < 3:
+            print(f"{delta_sym}: Not enough data")
+            continue
+        
+        # FIXED LOGIC
+        # daily[-1] = Aaj ki running candle (IGNORE)
+        # daily[-2] = Kal ki closed candle (PREVIOUS)
+        # daily[-3] = Parso ki closed candle (PREVIOUS TO PREVIOUS)
+        
+        prev_prev = daily[-3]  # Parso
+        prev = daily[-2]       # Kal - Last closed
+        
+        prev_prev_vol = float(prev_prev[5])
         prev_vol = float(prev[5])
-        curr_vol = float(curr[5])
         prev_close = float(prev[4])
-        curr_close = float(curr[4])
-        curr_open = float(curr[1])
+        prev_open = float(prev[1])
         
-        ratio = curr_vol / prev_vol if prev_vol>0 else 0
+        ratio = prev_vol / prev_prev_vol if prev_prev_vol > 0 else 0
         
-        if curr_vol > prev_vol:
-            color = "🟢 GREEN" if curr_close > curr_open else "🔴 RED"
+        # ENGULF CHECK: Kal ka Volume > Parso ka Volume
+        if prev_vol > prev_prev_vol:
+            color = "🟢 GREEN" if prev_close > prev_open else "🔴 RED"
             strength = "🔥 STRONG" if ratio >= 1.5 else "✓ NORMAL"
             engulf_list.append({
                 'coin': delta_sym,
                 'ratio': ratio,
                 'color': color,
                 'strength': strength,
-                'close': curr_close,
-                'curr_vol': curr_vol,
-                'prev_vol': prev_vol
+                'close': prev_close,
+                'prev_vol': prev_vol,
+                'prev_prev_vol': prev_prev_vol
             })
+            print(f"✓ {delta_sym} ENGULF | {ratio:.2f}x | {color}")
         else:
             no_engulf.append(delta_sym)
+            print(f"  {delta_sym} No engulf | {ratio:.2f}x")
 
     # Build Telegram message
     today = datetime.now().strftime('%Y-%m-%d')
-    msg = f"*📊 DAILY VOLUME ENGULF SCREENER*\n"
-    msg += f"Date: {today}\n"
+    msg = f"*📊 DAILY VOLUME ENGULF - CLOSED CANDLES*\n"
+    msg += f"Date: {today} | Check: Kal vs Parso\n"
     msg += f"Timeframe: 1D | Coins: TOP34 Delta\n"
     msg += f"--------------------------------\n"
     
     if engulf_list:
-        # Sort by ratio
         engulf_list_sorted = sorted(engulf_list, key=lambda x: x['ratio'], reverse=True)
         msg += f"*✓ ENGULF FOUND: {len(engulf_list)}/{len(TOP34_DELTA)}*\n\n"
         for e in engulf_list_sorted:
             msg += f"{e['strength']} *{e['coin']}* | {e['ratio']:.2f}x | {e['color']} | ${e['close']:.4f}\n"
         
-        msg += f"\n*Strong = 1.5x+ volume*\n"
-        msg += f"No Engulf: {', '.join(no_engulf[:10])}{'...' if len(no_engulf)>10 else ''}"
+        msg += f"\n_Strong = 1.5x+ volume_\n"
+        if no_engulf:
+            msg += f"No Engulf: {', '.join(no_engulf[:8])}{'...' if len(no_engulf)>8 else ''}"
     else:
-        msg += f"*No Volume Engulf Today*\nAll 34 coins me kal se kam volume hai."
+        msg += f"*No Volume Engulf*\nKal ka volume parso se kam tha sab me."
 
-    print(msg)
+    print("\n" + msg)
     send_telegram(msg)
 
 if __name__ == "__main__":
