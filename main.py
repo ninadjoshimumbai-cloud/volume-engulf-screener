@@ -15,14 +15,13 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 def send_telegram(msg):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram secrets not set")
         print(msg)
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}
         r = requests.post(url, json=data, timeout=10)
-        print(f"Telegram sent: {r.status_code} - {r.text}")
+        print(f"Telegram: {r.status_code}")
     except Exception as e:
         print(f"Telegram error: {e}")
 
@@ -34,81 +33,85 @@ def fetch_daily(sym, limit=60):
             if r.status_code != 200:
                 url = url.replace("data-api.binance.vision","api.binance.com")
                 r = requests.get(url, timeout=10)
-            if r.status_code != 200: 
-                return []
+            if r.status_code != 200: return []
             data = r.json()
             return [[int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])] for c in data]
-        except Exception as e:
-            print(f"Fetch error {sym}: {e}")
+        except:
             time.sleep(0.5)
     return []
 
+def get_candle_color(open_p, close_p):
+    if close_p > open_p: return "GREEN"
+    elif close_p < open_p: return "RED"
+    else: return "DOJI"
+
 def main():
-    print("Starting Daily Volume Engulf Screener - FIXED LOGIC")
-    print("Logic: Kal (closed) vs Parso (closed)")
-    
+    print("SCREENER: Volume Engulf + Color Flip (Kal vs Parso)")
     engulf_list = []
     no_engulf = []
 
     for delta_sym in TOP34_DELTA:
         bin_sym = BINANCE_MAP[delta_sym]
         daily = fetch_daily(bin_sym, 60)
-        
-        if len(daily) < 3:
-            print(f"{delta_sym}: Not enough data")
-            continue
-        
-        # FIXED LOGIC
-        # daily[-1] = Aaj ki running candle (IGNORE)
-        # daily[-2] = Kal ki closed candle (PREVIOUS)
-        # daily[-3] = Parso ki closed candle (PREVIOUS TO PREVIOUS)
+        if len(daily) < 3: continue
         
         prev_prev = daily[-3]  # Parso
-        prev = daily[-2]       # Kal - Last closed
+        prev = daily[-2]       # Kal
         
-        prev_prev_vol = float(prev_prev[5])
-        prev_vol = float(prev[5])
-        prev_close = float(prev[4])
-        prev_open = float(prev[1])
+        pp_open, pp_close, pp_vol = float(prev_prev[1]), float(prev_prev[4]), float(prev_prev[5])
+        p_open, p_close, p_vol = float(prev[1]), float(prev[4]), float(prev[5])
         
-        ratio = prev_vol / prev_prev_vol if prev_prev_vol > 0 else 0
+        pp_color = get_candle_color(pp_open, pp_close)
+        p_color = get_candle_color(p_open, p_close)
         
-        # ENGULF CHECK: Kal ka Volume > Parso ka Volume
-        if prev_vol > prev_prev_vol:
-            color = "🟢 GREEN" if prev_close > prev_open else "🔴 RED"
+        ratio = p_vol / pp_vol if pp_vol>0 else 0
+        
+        # CONDITION 1: Volume Engulf
+        vol_engulf = p_vol > pp_vol
+        
+        # CONDITION 2: Color Flip - GREEN to RED or RED to GREEN
+        color_flip = (pp_color == "GREEN" and p_color == "RED") or (pp_color == "RED" and p_color == "GREEN")
+        # Doji ko invalid maan rahe hai
+        
+        if vol_engulf and color_flip:
             strength = "🔥 STRONG" if ratio >= 1.5 else "✓ NORMAL"
+            # Flip direction
+            flip_txt = f"{pp_color}→{p_color}"
+            if pp_color=="GREEN" and p_color=="RED": emoji = "🔴 Bearish Engulf"
+            else: emoji = "🟢 Bullish Engulf"
+            
             engulf_list.append({
                 'coin': delta_sym,
                 'ratio': ratio,
-                'color': color,
                 'strength': strength,
-                'close': prev_close,
-                'prev_vol': prev_vol,
-                'prev_prev_vol': prev_prev_vol
+                'flip': flip_txt,
+                'emoji': emoji,
+                'close': p_close,
+                'p_vol': p_vol,
+                'pp_vol': pp_vol
             })
-            print(f"✓ {delta_sym} ENGULF | {ratio:.2f}x | {color}")
+            print(f"✓ {delta_sym} {flip_txt} {ratio:.2f}x")
         else:
+            reason = []
+            if not vol_engulf: reason.append("no vol")
+            if not color_flip: reason.append(f"same color {pp_color}->{p_color}")
             no_engulf.append(delta_sym)
-            print(f"  {delta_sym} No engulf | {ratio:.2f}x")
+            print(f"  {delta_sym} No - {', '.join(reason)}")
 
-    # Build Telegram message
     today = datetime.now().strftime('%Y-%m-%d')
-    msg = f"*📊 DAILY VOLUME ENGULF - CLOSED CANDLES*\n"
-    msg += f"Date: {today} | Check: Kal vs Parso\n"
-    msg += f"Timeframe: 1D | Coins: TOP34 Delta\n"
+    msg = f"*📊 VOLUME ENGULF + COLOR FLIP*\n"
+    msg += f"Date: {today} | Kal vs Parso (Closed)\n"
+    msg += f"Logic: Vol↑ + Color GREEN↔RED\n"
     msg += f"--------------------------------\n"
     
     if engulf_list:
-        engulf_list_sorted = sorted(engulf_list, key=lambda x: x['ratio'], reverse=True)
-        msg += f"*✓ ENGULF FOUND: {len(engulf_list)}/{len(TOP34_DELTA)}*\n\n"
-        for e in engulf_list_sorted:
-            msg += f"{e['strength']} *{e['coin']}* | {e['ratio']:.2f}x | {e['color']} | ${e['close']:.4f}\n"
-        
-        msg += f"\n_Strong = 1.5x+ volume_\n"
-        if no_engulf:
-            msg += f"No Engulf: {', '.join(no_engulf[:8])}{'...' if len(no_engulf)>8 else ''}"
+        engulf_list = sorted(engulf_list, key=lambda x: x['ratio'], reverse=True)
+        msg += f"*✓ FOUND: {len(engulf_list)}/{len(TOP34_DELTA)}*\n\n"
+        for e in engulf_list:
+            msg += f"{e['strength']} *{e['coin']}* | {e['flip']} | {e['ratio']:.2f}x | {e['emoji']} | ${e['close']:.4f}\n"
     else:
-        msg += f"*No Volume Engulf*\nKal ka volume parso se kam tha sab me."
+        msg += f"*No Engulf + Flip Today*\n"
+        msg += f"Ya toh volume kam tha ya color same tha."
 
     print("\n" + msg)
     send_telegram(msg)
